@@ -71,7 +71,7 @@ function MessageBubble({ msg }: { msg: Message }) {
 
       {/* Bubble */}
       <div className={`
-        max-w-[80%] rounded-2xl px-4 py-3 text-sm leading-relaxed
+        max-w-[90%] sm:max-w-[80%] rounded-2xl px-3 sm:px-4 py-2 sm:py-3 text-sm leading-relaxed
         ${isUser
           ? 'bg-gradient-to-br from-purple to-[#5a1fc8] text-white rounded-tr-none'
           : 'glass border border-border rounded-tl-none'}
@@ -242,7 +242,7 @@ export function ChatPanel() {
       <div
         ref={scrollRef}
         onScroll={handleScroll}
-        className="flex-1 overflow-y-auto px-5 py-4 flex flex-col gap-4"
+        className="flex-1 overflow-y-auto px-2 sm:px-5 py-3 sm:py-4 flex flex-col gap-4"
       >
         <AnimatePresence initial={false}>
           {messages.map((m) => <MessageBubble key={m.id} msg={m} />)}
@@ -279,7 +279,7 @@ export function ChatPanel() {
       </div>
 
       {/* Input zone */}
-      <div className="px-5 pb-5 flex-shrink-0">
+      <div className="px-2 sm:px-5 pb-3 sm:pb-5 flex-shrink-0">
         {/* File pills */}
         <AnimatePresence>
           {files.length > 0 && (
@@ -301,7 +301,7 @@ export function ChatPanel() {
         </AnimatePresence>
 
         <div className="
-          flex items-end gap-2 glass border border-border rounded-2xl p-3
+          flex flex-wrap sm:flex-nowrap items-end gap-2 glass border border-border rounded-2xl p-3
           focus-within:border-purple transition-colors
         ">
           {/* Attach */}

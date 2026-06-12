@@ -64,10 +64,10 @@ export function AppShell() {
       initial={{ opacity: 0 }}
       animate={{ opacity: 1 }}
       exit={{ opacity: 0 }}
-      className="flex h-screen w-screen overflow-hidden"
+      className="flex flex-col lg:flex-row h-screen w-screen overflow-hidden"
     >
       {/* ── Left sidebar: Robot + Tools (FIXED) ── */}
-      <aside className="w-72 flex-shrink-0 flex flex-col h-full border-r border-border bg-bg/80 backdrop-blur-xl overflow-y-auto">
+      <aside className="hidden lg:flex w-72 flex-shrink-0 flex-col h-full border-r border-border bg-bg/80 backdrop-blur-xl overflow-y-auto">
 
         {/* Logo */}
         <div className="flex items-center gap-2.5 px-4 py-3.5 border-b border-border flex-shrink-0">
@@ -143,17 +143,17 @@ export function AppShell() {
       </aside>
 
       {/* ── Center: Chat ── */}
-      <main className="flex-1 flex flex-col min-w-0 border-r border-border">
+      <main className="flex-1 flex flex-col min-w-0 w-full">
         <ChatPanel />
       </main>
 
       {/* ── Right-Center: Trace ── */}
-      <aside className="w-80 flex-shrink-0 flex flex-col h-full bg-bg/60 backdrop-blur-xl border-r border-border">
+      <aside className="hidden xl:flex w-80 flex-shrink-0 flex-col h-full bg-bg/60 backdrop-blur-xl border-r border-border">
         <TracePanel />
       </aside>
 
       {/* ── Far Right: Chat History ── */}
-      <aside className="w-64 flex-shrink-0 flex flex-col h-full border-r border-border bg-bg/80 backdrop-blur-xl">
+      <aside className="hidden xl:flex w-64 flex-shrink-0 flex-col h-full border-r border-border bg-bg/80 backdrop-blur-xl">
         <div className="px-4 py-3.5 border-b border-border flex-shrink-0">
           <div className="flex items-center justify-between gap-2 mb-3">
             <div>
