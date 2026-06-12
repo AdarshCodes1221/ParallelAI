@@ -43,7 +43,7 @@ export function AppShell() {
     )
     if (!alreadyHasWelcome) {
       state.addMessage({
-        id: crypto.randomUUID(),
+        id: `${Date.now()}-${Math.random().toString(36).slice(2)}`,
         role: 'assistant',
         text: "👋 Hi! I'm your **Multimodal AI Agent**.\n\nUpload **PDFs**, **images**, **audio** or just type a question — I'll plan and execute the right tools automatically.",
       })

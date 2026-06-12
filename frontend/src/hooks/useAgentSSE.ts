@@ -22,10 +22,10 @@ export function useAgentSSE() {
     if (abortRef.current) abortRef.current.abort()
     abortRef.current = new AbortController()
 
-    const userMsgId = crypto.randomUUID()
+    const userMsgId = `${Date.now()}-${Math.random().toString(36).slice(2)}`
     addMessage({ id: userMsgId, role: 'user', text: query, files: files.map((f) => f.name) })
 
-    const assistantMsgId = crypto.randomUUID()
+    const assistantMsgId = `${Date.now()}-${Math.random().toString(36).slice(2)}`
     addMessage({ id: assistantMsgId, role: 'assistant', text: '', streaming: true })
 
     setRobotState('thinking')

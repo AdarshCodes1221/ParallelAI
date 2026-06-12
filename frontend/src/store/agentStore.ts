@@ -126,7 +126,7 @@ const deriveTitle = (text: string) => {
 }
 
 const createEmptyChat = () => {
-  const id = crypto.randomUUID()
+  const id = `${Date.now()}-${Math.random().toString(36).slice(2)}`
   return {
     currentChatId: id,
     currentChatTitle: 'New Chat',
