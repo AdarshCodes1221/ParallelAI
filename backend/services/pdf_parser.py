@@ -1,6 +1,7 @@
 import logging
 import os
 import pdfplumber
+from core.config import get_settings
 
 from services.gemini_service import (
     GeminiService,
@@ -18,6 +19,22 @@ class PDFParser:
     Layer 2:
         Gemini OCR fallback (scanned PDFs)
     """
+
+    @staticmethod
+    def extract_links(file_path: str) -> list[dict]:
+        links = []
+        try:
+            import fitz
+            with fitz.open(file_path) as pdf:
+                for page_number, page in enumerate(pdf, start=1):
+                    for link in page.get_links():
+                        if link.get("uri"):
+                            rect = link.get("from")
+                            bbox = [rect.x0, rect.y0, rect.x1, rect.y1] if rect else None
+                            links.append({"uri": link["uri"], "page": page_number, "bbox": bbox})
+        except Exception as exc:
+            logger.warning("PDF link extraction failed: %s", type(exc).__name__)
+        return links
 
     @staticmethod
     def extract_text(
@@ -86,8 +103,7 @@ class PDFParser:
                 return extracted
 
             logger.warning(
-                "Little/no text found. "
-                "Switching to Gemini OCR."
+                "Little/no text found. Switching to local OCR."
             )
 
         except Exception as e:
@@ -96,7 +112,31 @@ class PDFParser:
             )
 
         # --------------------------------------------------
-        # Layer 2 : Gemini OCR
+        # Layer 2 : local Tesseract OCR for scanned PDFs
+        # --------------------------------------------------
+        try:
+            import io
+            import fitz
+            import pytesseract
+            from PIL import Image
+
+            ocr_parts = []
+            with fitz.open(file_path) as pdf:
+                for page in pdf:
+                    pixmap = page.get_pixmap(matrix=fitz.Matrix(2, 2), alpha=False)
+                    image = Image.open(io.BytesIO(pixmap.tobytes("png")))
+                    page_text = pytesseract.image_to_string(image).strip()
+                    if page_text:
+                        ocr_parts.append(page_text)
+            local_text = "\n\n".join(ocr_parts).strip()
+            if local_text:
+                logger.info("Local Tesseract PDF OCR extracted %d chars", len(local_text))
+                return local_text
+        except Exception as exc:
+            logger.warning("Local PDF OCR failed: %s", type(exc).__name__)
+
+        # --------------------------------------------------
+        # Layer 3 : Gemini OCR fallback
         # --------------------------------------------------
         if not api_key:
 

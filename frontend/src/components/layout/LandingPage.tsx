@@ -1,6 +1,6 @@
 import { useEffect, useRef } from 'react'
-import { motion, useScroll, useTransform } from 'framer-motion'
-import { Zap, ArrowRight, PlayCircle, Layers, GitBranch, HelpCircle, Activity, Box, Search, Shield, Cpu, ExternalLink, MessageSquare, Terminal } from 'lucide-react'
+import { motion, useScroll } from 'framer-motion'
+import { ArrowRight, Layers, GitBranch, Activity, Shield, Cpu } from 'lucide-react'
 import { useAgentStore } from '@/store/agentStore'
 import { Robot3D } from '@/components/robot/Robot3D'
 
@@ -67,9 +67,8 @@ const FEATURES = [
 ]
 
 export function LandingPage() {
-  const { setPage } = useAgentStore()
-  const { scrollYProgress } = useScroll()
-  const opacity = useTransform(scrollYProgress, [0, 0.2], [1, 0])
+  const { setPage, user, setAuthModalOpen, setAuthMode } = useAgentStore()
+  useScroll()
 
   const scrollToSection = (id: string) => {
     const el = document.getElementById(id)
@@ -95,13 +94,30 @@ export function LandingPage() {
             </button>
           ))}
         </div>
-        <div className="flex items-center gap-4">
-          <button
-            onClick={() => setPage('app')}
-            className="px-4 py-1.5 rounded-md text-sm font-medium bg-white text-black hover:bg-gray-200 transition-colors shadow-[0_0_15px_rgba(255,255,255,0.1)]"
-          >
-            Launch Agent
-          </button>
+        <div className="flex items-center gap-3">
+          {user ? (
+            <button
+              onClick={() => setPage('app')}
+              className="px-4 py-1.5 rounded-md text-sm font-medium bg-gradient-to-r from-cyan-500 to-purple-600 text-slate-950 hover:brightness-110 transition-colors shadow-[0_0_15px_rgba(6,182,212,0.25)]"
+            >
+              Open Workspace
+            </button>
+          ) : (
+            <>
+              <button
+                onClick={() => { setAuthMode('login'); setAuthModalOpen(true); }}
+                className="px-3.5 py-1.5 rounded-md text-sm font-medium text-slate-300 hover:text-white hover:bg-white/5 transition-colors"
+              >
+                Sign In
+              </button>
+              <button
+                onClick={() => { setAuthMode('signup'); setAuthModalOpen(true); }}
+                className="px-4 py-1.5 rounded-md text-sm font-medium bg-white text-black hover:bg-gray-200 transition-colors shadow-[0_0_15px_rgba(255,255,255,0.1)]"
+              >
+                Get Started
+              </button>
+            </>
+          )}
         </div>
       </nav>
 
@@ -145,16 +161,16 @@ export function LandingPage() {
               className="flex items-center gap-4 pt-4"
             >
               <button
-                onClick={() => setPage('app')}
+                onClick={() => user ? setPage('app') : (setAuthMode('signup'), setAuthModalOpen(true))}
                 className="px-6 py-3 rounded-md bg-white text-black font-medium hover:bg-gray-200 transition-colors flex items-center gap-2"
               >
-                Try Parallel AI <ArrowRight size={16} />
+                {user ? 'Launch Workspace' : 'Get Started Free'} <ArrowRight size={16} />
               </button>
               <button
-                onClick={() => scrollToSection('demo')}
+                onClick={() => scrollToSection('features')}
                 className="px-6 py-3 rounded-md bg-[#111] border border-white/10 text-white font-medium hover:bg-[#1a1a1a] transition-colors flex items-center gap-2"
               >
-                <PlayCircle size={16} /> Watch Demo
+                Explore Architecture
               </button>
             </motion.div>
           </div>

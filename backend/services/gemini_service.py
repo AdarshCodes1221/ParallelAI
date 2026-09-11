@@ -16,9 +16,8 @@ class GeminiService:
     @staticmethod
     def configure(api_key: str):
         logger.info(
-            "GeminiService.configure called: key_present=%s, key_prefix=%s",
+            "GeminiService.configure called: key_present=%s",
             bool(api_key),
-            (api_key[:10] + "...") if api_key else "N/A",
         )
         if not api_key:
             logger.error("GeminiService.configure: missing API key")

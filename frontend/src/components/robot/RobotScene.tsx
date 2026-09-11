@@ -25,13 +25,14 @@ function FloatingParticles({ active }: { active: boolean }) {
     const p = new Float32Array(COUNT * 3)
     const c = new Float32Array(COUNT * 3)
     for (let i = 0; i < COUNT; i++) {
-      const th = Math.random() * Math.PI * 2
-      const ph = Math.acos(2 * Math.random() - 1)
-      const r  = 1.5 + Math.random() * 1.5
+      const seed = i + 1
+      const th = (seed * 2.399963) % (Math.PI * 2)
+      const ph = Math.acos(1 - 2 * ((seed * 0.618033) % 1))
+      const r  = 1.5 + ((seed * 0.754877) % 1) * 1.5
       p[i*3]   = r * Math.sin(ph) * Math.cos(th)
       p[i*3+1] = r * Math.sin(ph) * Math.sin(th) * 0.8
       p[i*3+2] = r * Math.cos(ph)
-      const t  = Math.random()
+      const t  = (seed * 0.56984) % 1
       c[i*3]   = 0.54; c[i*3+1] = 0.25 + t*0.55; c[i*3+2] = 1.0
     }
     return [p, c]

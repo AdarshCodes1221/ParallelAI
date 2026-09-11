@@ -1,7 +1,33 @@
 import { create } from 'zustand'
 import { persist } from 'zustand/middleware'
 
+// Purge any legacy persisted user chat/session/message data from localStorage on startup
+if (typeof window !== 'undefined') {
+  try {
+    const raw = localStorage.getItem('agent-chat-storage')
+    if (raw) {
+      const parsed = JSON.parse(raw)
+      if (parsed?.state) {
+        let dirty = false
+        for (const k of ['messages', 'sessions', 'currentChatId', 'currentChatTitle', 'extractedFiles', 'planSteps', 'cost', 'user', 'authStatus']) {
+          if (k in parsed.state) {
+            delete parsed.state[k]
+            dirty = true
+          }
+        }
+        if (dirty) {
+          localStorage.setItem('agent-chat-storage', JSON.stringify(parsed))
+        }
+      }
+    }
+  } catch {
+    // ignore storage access errors
+  }
+}
+
 export type RobotState = 'idle' | 'thinking' | 'done' | 'wave' | 'audio'
+export type AuthStatus = 'loading' | 'authenticated' | 'unauthenticated'
+export type AuthMode = 'login' | 'signup' | 'forgot' | 'reset' | 'change_password'
 
 export interface Message {
   id: string
@@ -46,22 +72,87 @@ export interface ChatSession {
   cost: CostInfo | null
 }
 
-// Available Gemini models
+// Available AI models
 export const GEMINI_MODELS = [
-  { value: 'models/gemini-2.5-flash', label: 'Gemini 2.5 Flash ⚡ (Recommended)' },
+  { value: 'ollama/llama3.2:3b', label: 'Ollama Llama 3.2:3B 🦙 (100% Local / Free)' },
+  { value: 'models/gemini-2.5-flash', label: 'Gemini 2.5 Flash ⚡' },
   { value: 'models/gemini-2.5-pro', label: 'Gemini 2.5 Pro 🧠' },
   { value: 'models/gemini-2.0-flash', label: 'Gemini 2.0 Flash' },
   { value: 'models/gemini-2.0-flash-lite', label: 'Gemini 2.0 Flash Lite (Free)' },
   { value: 'models/gemini-3.5-flash', label: 'Gemini 3.5 Flash ✨' },
-  { value: 'models/gemini-flash-latest', label: 'Gemini Flash Latest' },
 ] as const
 
 export type GeminiModelValue = typeof GEMINI_MODELS[number]['value']
 
+export interface User {
+  id: string
+  email: string
+  name?: string
+  created_at?: string
+}
+
+// Helper to extract CSRF cookie from document.cookie
+export function getCsrfToken(): string {
+  if (typeof document === 'undefined') return ''
+  const match = document.cookie.match(/(^|;)\s*csrf_token=([^;]+)/)
+  return match ? decodeURIComponent(match[2]) : ''
+}
+
+// Robust error response reader
+async function parseErrorResponse(res: Response, defaultMsg: string): Promise<string> {
+  try {
+    const contentType = res.headers.get('content-type') || ''
+    if (contentType.includes('application/json')) {
+      const data = await res.json()
+      if (typeof data.detail === 'string') {
+        const lower = data.detail.toLowerCase()
+        if (lower.includes('already exists') || lower.includes('already registered')) {
+          return 'An account with this email already exists. Sign in instead.'
+        }
+        return data.detail
+      }
+      if (Array.isArray(data.detail)) {
+        return data.detail.map((e: Record<string, unknown>) => String(e.msg || JSON.stringify(e))).join(', ')
+      }
+      if (data.message) return data.message
+    }
+    const text = await res.text()
+    if (text && !text.startsWith('<')) {
+      if (text.toLowerCase().includes('already exists') || text.toLowerCase().includes('already registered')) {
+        return 'An account with this email already exists. Sign in instead.'
+      }
+      return text.slice(0, 200)
+    }
+  } catch {
+    // fallback
+  }
+  return defaultMsg
+}
+
+let _signupInFlight = false
+let _loginInFlight = false
+let _authEpoch = 0
+let _fetchSessionsEpoch = 0
+
 interface AgentStore {
-  // Navigation
+  // Navigation & Auth
   page: 'landing' | 'app'
   setPage: (p: 'landing' | 'app') => void
+  user: User | null
+  authStatus: AuthStatus
+  authModalOpen: boolean
+  authMode: AuthMode
+  setAuthModalOpen: (open: boolean) => void
+  setAuthMode: (mode: AuthMode) => void
+  login: (email: string, password: string) => Promise<void>
+  signup: (email: string, password: string, name?: string) => Promise<{ status: string; message: string; user?: User }>
+  logout: () => Promise<void>
+  forgotPassword: (email: string) => Promise<string>
+  resetPassword: (token: string, newPassword: string) => Promise<string>
+  changePassword: (currentPassword: string, newPassword: string) => Promise<void>
+  checkAuth: () => Promise<void>
+  fetchSessions: () => Promise<void>
+  resetUserScopedState: () => void
 
   // Robot
   robotState: RobotState
@@ -79,8 +170,9 @@ interface AgentStore {
   currentChatCreatedAt: number
   sessions: ChatSession[]
   createNewChat: () => void
-  restoreChat: (sessionId: string) => void
-  deleteChat: (sessionId: string) => void
+  restoreChat: (sessionId: string) => Promise<void>
+  renameChat: (sessionId: string, newTitle: string) => Promise<void>
+  deleteChat: (sessionId: string) => Promise<void>
   clearCurrentConversation: () => void
   setCurrentChatTitle: (title: string) => void
   saveCurrentSessionToHistory: () => void
@@ -144,6 +236,229 @@ export const useAgentStore = create<AgentStore>()(
       page: 'landing',
       setPage: (page) => set({ page }),
 
+      user: null,
+      authStatus: 'loading',
+      authModalOpen: false,
+      authMode: 'login',
+      setAuthModalOpen: (authModalOpen) => set({ authModalOpen }),
+      setAuthMode: (authMode) => set({ authMode }),
+
+      resetUserScopedState: () => {
+        const fresh = createEmptyChat()
+        set({
+          user: null,
+          authStatus: 'unauthenticated',
+          currentChatId: fresh.currentChatId,
+          currentChatTitle: fresh.currentChatTitle,
+          currentChatCreatedAt: fresh.currentChatCreatedAt,
+          messages: [],
+          planSteps: [],
+          cost: null,
+          extractedFiles: [],
+          sessions: [],
+          activeToolCard: null,
+          hoverTarget: null,
+          pendingToolCommand: null,
+          robotState: 'idle',
+        })
+      },
+
+      login: async (email: string, password: string) => {
+        if (_loginInFlight) return
+        _loginInFlight = true
+        const epoch = ++_authEpoch
+        try {
+          const res = await fetch('/api/auth/login', {
+            method: 'POST',
+            credentials: 'include',
+            headers: {
+              'Content-Type': 'application/json',
+              'X-Requested-With': 'XMLHttpRequest',
+            },
+            body: JSON.stringify({ email, password }),
+          })
+          if (!res.ok) {
+            const errMsg = await parseErrorResponse(res, 'Login failed. Please check your credentials.')
+            throw new Error(errMsg)
+          }
+          if (epoch !== _authEpoch) return
+          const data = await res.json()
+          get().resetUserScopedState()
+          set({ user: data.user, authStatus: 'authenticated', page: 'app' })
+          await get().fetchSessions()
+        } finally {
+          _loginInFlight = false
+        }
+      },
+
+      signup: async (email: string, password: string, name?: string) => {
+        if (_signupInFlight) return { status: 'in_flight', message: '' }
+        _signupInFlight = true
+        try {
+          const res = await fetch('/api/auth/signup', {
+            method: 'POST',
+            credentials: 'include',
+            headers: {
+              'Content-Type': 'application/json',
+              'X-Requested-With': 'XMLHttpRequest',
+            },
+            body: JSON.stringify({ email, password, name }),
+          })
+          if (!res.ok) {
+            const errMsg = await parseErrorResponse(res, 'Registration failed. Please check your details.')
+            throw new Error(errMsg)
+          }
+          const data = await res.json()
+          // CRITICAL: Registration does NOT authenticate the user or create a chat/session
+          return data
+        } finally {
+          _signupInFlight = false
+        }
+      },
+
+      logout: async () => {
+        ++_authEpoch
+        try {
+          const csrf = getCsrfToken()
+          await fetch('/api/auth/logout', {
+            method: 'POST',
+            credentials: 'include',
+            headers: {
+              'X-CSRF-Token': csrf,
+              'X-Requested-With': 'XMLHttpRequest',
+            },
+          })
+        } catch {
+          // ignore network errors on logout
+        }
+        get().resetUserScopedState()
+        set({ page: 'landing' })
+      },
+
+      forgotPassword: async (email: string): Promise<string> => {
+        const res = await fetch('/api/auth/forgot-password', {
+          method: 'POST',
+          credentials: 'include',
+          headers: {
+            'Content-Type': 'application/json',
+            'X-Requested-With': 'XMLHttpRequest',
+          },
+          body: JSON.stringify({ email }),
+        })
+        if (!res.ok) {
+          const errMsg = await parseErrorResponse(res, 'Could not send password reset link.')
+          throw new Error(errMsg)
+        }
+        const data = await res.json()
+        return data.message || "If an account with that email exists, a password reset link has been sent."
+      },
+
+      resetPassword: async (token: string, newPassword: string): Promise<string> => {
+        const res = await fetch('/api/auth/reset-password', {
+          method: 'POST',
+          credentials: 'include',
+          headers: {
+            'Content-Type': 'application/json',
+            'X-Requested-With': 'XMLHttpRequest',
+          },
+          body: JSON.stringify({ token, new_password: newPassword }),
+        })
+        if (!res.ok) {
+          const errMsg = await parseErrorResponse(res, 'That password reset link is invalid or has expired. Please request a new one.')
+          throw new Error(errMsg)
+        }
+        const data = await res.json()
+        return data.message || "Password has been successfully updated. You can now log in."
+      },
+
+      changePassword: async (currentPassword: string, newPassword: string) => {
+        const csrf = getCsrfToken()
+        const res = await fetch('/api/auth/change-password', {
+          method: 'POST',
+          credentials: 'include',
+          headers: {
+            'Content-Type': 'application/json',
+            'X-CSRF-Token': csrf,
+            'X-Requested-With': 'XMLHttpRequest',
+          },
+          body: JSON.stringify({ current_password: currentPassword, new_password: newPassword }),
+        })
+        if (!res.ok) {
+          const errMsg = await parseErrorResponse(res, 'Password change failed.')
+          throw new Error(errMsg)
+        }
+      },
+
+      checkAuth: async () => {
+        const epoch = ++_authEpoch
+        try {
+          const res = await fetch('/api/auth/me', {
+            credentials: 'include',
+            headers: {
+              'X-Requested-With': 'XMLHttpRequest',
+            },
+          })
+          if (epoch !== _authEpoch) return
+          if (res.ok) {
+            const data = await res.json()
+            const currentUser = get().user
+            const userChanged = !currentUser || currentUser.id !== data.user.id
+            if (userChanged) {
+              get().resetUserScopedState()
+              set({ user: data.user, authStatus: 'authenticated', page: 'app' })
+              await get().fetchSessions()
+            } else {
+              set({ user: data.user, authStatus: 'authenticated', page: 'app' })
+              await get().fetchSessions()
+            }
+          } else {
+            get().resetUserScopedState()
+          }
+        } catch {
+          if (epoch === _authEpoch) {
+            get().resetUserScopedState()
+          }
+        }
+      },
+
+      fetchSessions: async () => {
+        const epoch = ++_fetchSessionsEpoch
+        try {
+          const res = await fetch('/api/sessions', {
+            credentials: 'include',
+            headers: { 'X-Requested-With': 'XMLHttpRequest' },
+          })
+          if (epoch !== _fetchSessionsEpoch) return
+          if (res.ok) {
+            const data = await res.json()
+            const backendSessions: ChatSession[] = Array.isArray(data.sessions)
+              ? data.sessions.map((s: Record<string, unknown>) => ({
+                  id: String(s.id),
+                  title: String(s.title || 'Chat'),
+                  createdAt: s.created_at ? new Date(String(s.created_at)).getTime() : Date.now(),
+                  updatedAt: s.updated_at ? new Date(String(s.updated_at)).getTime() : Date.now(),
+                  messages: [],
+                  planSteps: [],
+                  extractedFiles: [],
+                  cost: null,
+                }))
+              : []
+
+            set({ sessions: backendSessions })
+
+            const state = get()
+            const currentExists = backendSessions.some((s) => s.id === state.currentChatId)
+            if (!currentExists && backendSessions.length > 0) {
+              await get().restoreChat(backendSessions[0].id)
+            } else if (backendSessions.length === 0) {
+              get().createNewChat()
+            }
+          }
+        } catch {
+          // offline or background sync failure
+        }
+      },
+
       robotState: 'idle',
       setRobotState: (robotState) => set({ robotState }),
       activeToolCard: null,
@@ -173,31 +488,106 @@ export const useAgentStore = create<AgentStore>()(
           extractedFiles: [],
         })
       },
-      restoreChat: (sessionId) => {
+      restoreChat: async (sessionId: string) => {
         const state = get()
         const session = state.sessions.find((s) => s.id === sessionId)
-        if (!session) return
 
         if (state.messages.length || state.planSteps.length || state.extractedFiles.length) {
           state.saveCurrentSessionToHistory()
         }
 
-        const nextSessions = state.sessions.filter((s) => s.id !== sessionId)
+        // Fetch detailed message history from backend for this session
+        try {
+          const res = await fetch(`/api/sessions/${sessionId}`, {
+            credentials: 'include',
+            headers: { 'X-Requested-With': 'XMLHttpRequest' },
+          })
+          if (res.ok) {
+            const data = await res.json()
+            const backendMessages: Message[] = (data.messages || []).map((m: Record<string, unknown>, idx: number) => ({
+              id: `msg-${sessionId}-${idx}-${Date.now()}`,
+              role: (m.role || 'assistant') as 'user' | 'assistant',
+              text: String(m.content || ''),
+            }))
+
+            const activeTitle = data.session?.title || session?.title || 'Chat'
+            const activeCreatedAt = data.session?.created_at
+              ? new Date(data.session.created_at).getTime()
+              : session?.createdAt || Date.now()
+
+            set({
+              currentChatId: sessionId,
+              currentChatTitle: activeTitle,
+              currentChatCreatedAt: activeCreatedAt,
+              messages: backendMessages,
+              planSteps: [],
+              cost: null,
+              extractedFiles: [],
+            })
+            return
+          }
+        } catch {
+          // fallback to client session
+        }
+
+        if (!session) return
         set({
           currentChatId: session.id,
           currentChatTitle: session.title,
           currentChatCreatedAt: session.createdAt,
-          messages: session.messages,
-          planSteps: session.planSteps,
-          cost: session.cost,
-          extractedFiles: session.extractedFiles,
-          sessions: [session, ...nextSessions].slice(0, 5),
+          messages: session.messages || [],
+          planSteps: session.planSteps || [],
+          cost: session.cost || null,
+          extractedFiles: session.extractedFiles || [],
         })
       },
-      deleteChat: (sessionId) =>
+      renameChat: async (sessionId: string, newTitle: string) => {
+        const trimmed = newTitle.trim()
+        if (!trimmed) return
         set((state) => ({
-          sessions: state.sessions.filter((s) => s.id !== sessionId),
-        })),
+          currentChatTitle: state.currentChatId === sessionId ? trimmed : state.currentChatTitle,
+          sessions: state.sessions.map((s) => (s.id === sessionId ? { ...s, title: trimmed } : s)),
+        }))
+        try {
+          const csrf = getCsrfToken()
+          await fetch(`/api/sessions/${sessionId}`, {
+            method: 'PATCH',
+            credentials: 'include',
+            headers: {
+              'Content-Type': 'application/json',
+              'X-CSRF-Token': csrf,
+              'X-Requested-With': 'XMLHttpRequest',
+            },
+            body: JSON.stringify({ title: trimmed }),
+          })
+        } catch {
+          // ignore network failure
+        }
+      },
+      deleteChat: async (sessionId: string) => {
+        try {
+          const csrf = getCsrfToken()
+          await fetch(`/api/sessions/${sessionId}`, {
+            method: 'DELETE',
+            credentials: 'include',
+            headers: {
+              'X-CSRF-Token': csrf,
+              'X-Requested-With': 'XMLHttpRequest',
+            },
+          })
+        } catch {
+          // ignore network failure
+        }
+        const remaining = get().sessions.filter((s) => s.id !== sessionId)
+        set({ sessions: remaining })
+        if (get().currentChatId === sessionId) {
+          if (remaining.length > 0) {
+            await get().restoreChat(remaining[0].id)
+          } else {
+            get().createNewChat()
+          }
+        }
+      },
       clearCurrentConversation: () => {
         const state = get()
         if (state.messages.length || state.planSteps.length || state.extractedFiles.length) {
@@ -226,6 +616,9 @@ export const useAgentStore = create<AgentStore>()(
         }
 
         const firstUser = state.messages.find((m) => m.role === 'user')
+        if (!firstUser && !state.extractedFiles.length) {
+          return
+        }
         const title = state.currentChatTitle !== 'New Chat'
           ? state.currentChatTitle
           : firstUser
@@ -244,7 +637,7 @@ export const useAgentStore = create<AgentStore>()(
         }
 
         const existing = state.sessions.filter((item) => item.id !== session.id)
-        const sessions = [session, ...existing].slice(0, 5)
+        const sessions = [session, ...existing].slice(0, 15)
         set({ sessions })
       },
 
@@ -306,14 +699,8 @@ export const useAgentStore = create<AgentStore>()(
     {
       name: 'agent-chat-storage',
       partialize: (state) => ({
-        messages: state.messages,
-        planSteps: state.planSteps,
-        extractedFiles: state.extractedFiles,
-        sessions: state.sessions,
-        currentChatId: state.currentChatId,
-        currentChatTitle: state.currentChatTitle,
-        currentChatCreatedAt: state.currentChatCreatedAt,
-        cost: state.cost,
+        // Strictly persist client UI preferences only — NEVER persist user-scoped chat/session/token data!
+        selectedModel: state.selectedModel,
       }),
     }
   )

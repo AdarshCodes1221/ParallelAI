@@ -1,4 +1,4 @@
-﻿"""
+"""
 YouTube transcript fetcher using youtube-transcript-api.
 
 This module provides a simple backward-compatible wrapper around the
@@ -149,16 +149,17 @@ class YouTubeFetcher:
         return " ".join(filter(None, parts)).strip()
 
     @staticmethod
-    def fetch_transcript(text: str) -> str:
+    def fetch_transcript_and_snippets(text: str) -> tuple[str, list[dict]]:
         if YouTubeTranscriptApi is None:
             return (
                 "Failed to fetch YouTube transcript: youtube-transcript-api is not installed. "
-                "Run: pip install youtube-transcript-api"
+                "Run: pip install youtube-transcript-api",
+                [],
             )
 
         video_id = YouTubeFetcher.extract_video_id(text)
         if not video_id:
-            return "No valid YouTube URL found in the provided text."
+            return "No valid YouTube URL found in the provided text.", []
 
         logger.info("YouTube: fetching transcript for video_id=%s", video_id)
 
@@ -168,53 +169,107 @@ class YouTubeFetcher:
             else:
                 snippets = YouTubeFetcher._fetch_with_old_api(video_id)
 
+            clean_snippets = []
+            for item in snippets:
+                s_text = getattr(item, "text", "") if hasattr(item, "text") else (item.get("text", "") if isinstance(item, dict) else "")
+                s_start = getattr(item, "start", 0.0) if hasattr(item, "start") else (item.get("start", 0.0) if isinstance(item, dict) else 0.0)
+                s_dur = getattr(item, "duration", 0.0) if hasattr(item, "duration") else (item.get("duration", 0.0) if isinstance(item, dict) else 0.0)
+                if s_text:
+                    clean_snippets.append({
+                        "text": s_text,
+                        "start": float(s_start or 0.0),
+                        "duration": float(s_dur or 0.0),
+                    })
+
             transcript_text = YouTubeFetcher._snippets_to_text(snippets)
             if not transcript_text:
-                return f"Failed to fetch YouTube transcript: Transcript was empty for video {video_id}."
-            logger.info("YouTube: transcript fetched successfully (%d chars)", len(transcript_text))
-            return transcript_text
+                return f"Failed to fetch YouTube transcript: Transcript was empty for video {video_id}.", []
+            logger.info("YouTube: transcript fetched successfully (%d chars, %d snippets)", len(transcript_text), len(clean_snippets))
+            return transcript_text, clean_snippets
 
         except TranscriptsDisabled:
             return (
                 f"Failed to fetch YouTube transcript: Transcripts/captions are disabled for this video ({video_id}). "
-                "The video owner has turned off captions."
+                "The video owner has turned off captions.",
+                [],
             )
         except NoTranscriptFound:
             return (
                 f"Failed to fetch YouTube transcript: No transcript found in any language for video ({video_id}). "
-                "Try a different video or check if captions are available."
+                "Try a different video or check if captions are available.",
+                [],
             )
         except VideoUnavailable:
             return (
                 f"Failed to fetch YouTube transcript: Video {video_id} is unavailable "
-                "(private, deleted, or region-locked)."
+                "(private, deleted, or region-locked).",
+                [],
             )
         except (RequestBlocked, IpBlocked):
             return (
                 "Failed to fetch YouTube transcript: YouTube has blocked requests from this server's IP address. "
-                "This commonly happens in cloud/server environments. Consider configuring a proxy."
+                "This commonly happens in cloud/server environments. Consider configuring a proxy.",
+                [],
             )
         except YouTubeRequestFailed as e:
             msg = str(e)
             if "403" in msg:
                 return (
                     f"Failed to fetch YouTube transcript: YouTube returned 403 Forbidden for video {video_id}. "
-                    "This typically means the server IP is rate-limited or blocked by YouTube."
+                    "This typically means the server IP is rate-limited or blocked by YouTube.",
+                    [],
                 )
             if "404" in msg:
                 return (
                     f"Failed to fetch YouTube transcript: Video {video_id} not found (404). "
-                    "Please check the URL is correct."
+                    "Please check the URL is correct.",
+                    [],
                 )
-            return f"Failed to fetch YouTube transcript: YouTube request failed — {msg}"
+            return f"Failed to fetch YouTube transcript: YouTube request failed — {msg}", []
         except CouldNotRetrieveTranscript as e:
-            return f"Failed to fetch YouTube transcript: Could not retrieve transcript — {str(e)}"
+            return f"Failed to fetch YouTube transcript: Could not retrieve transcript — {str(e)}", []
         except Exception as e:
             error_str = str(e)
             if "no element found" in error_str or "ParseError" in type(e).__name__:
                 return (
                     f"Failed to fetch YouTube transcript: Received an empty response from YouTube's transcript service for video {video_id}. "
-                    "This is usually caused by YouTube blocking automated requests from server IPs."
+                    "This is usually caused by YouTube blocking automated requests from server IPs.",
+                    [],
                 )
             logger.exception("YouTube fetch unexpected error for video %s: %s", video_id, e)
-            return f"Failed to fetch YouTube transcript: {type(e).__name__}: {error_str}"
+            return f"Failed to fetch YouTube transcript: {type(e).__name__}: {error_str}", []
+
+    @staticmethod
+    def fetch_transcript(text: str) -> str:
+        transcript, _ = YouTubeFetcher.fetch_transcript_and_snippets(text)
+        return transcript
+
+    @staticmethod
+    def fetch_with_gemini_fallback(text: str, api_key: str, model_name: str = "gemini-2.5-flash") -> str:
+        transcript, _ = YouTubeFetcher.fetch_with_gemini_fallback_with_snippets(text, api_key, model_name)
+        return transcript
+
+    @staticmethod
+    def fetch_with_gemini_fallback_with_snippets(text: str, api_key: str, model_name: str = "gemini-2.5-flash") -> tuple[str, list[dict]]:
+        direct, snippets = YouTubeFetcher.fetch_transcript_and_snippets(text)
+        if not direct.startswith("Failed") and not direct.startswith("No valid"):
+            return direct, snippets
+        if not api_key:
+            return direct, []
+        try:
+            from services.providers.router import ProviderRouter
+            gemini_model = model_name if (model_name and "gemini" in model_name.lower()) else "gemini-2.5-flash"
+            transcript, provider = ProviderRouter().generate_with_metadata(
+                f"Retrieve and transcribe the spoken content from this YouTube URL: {text}\n"
+                "Return only a transcript. If unavailable, state that it is unavailable. Do not invent content.",
+                model=gemini_model,
+                providers=("gemini",),
+            )
+            logger.info("YouTube fallback provider=%s model=%s", provider, gemini_model)
+            transcript = transcript.strip()
+            if transcript and "unavailable" not in transcript.lower():
+                return transcript, []
+            return direct, []
+        except Exception as exc:
+            logger.warning("YouTube Gemini fallback failed: %s", exc)
+            return direct, []

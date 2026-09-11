@@ -14,11 +14,9 @@
     "moduleDetection": "force",
     "noEmit": true,
     "jsx": "react-jsx",
-    "ignoreDeprecations": "6.0",
 
     /* Path aliases */
-    "baseUrl": ".",
-    "paths": { "@/*": ["src/*"] },
+    "paths": { "@/*": ["./src/*"] },
 
     /* Linting — relaxed for generated code */
     "noUnusedLocals": false,

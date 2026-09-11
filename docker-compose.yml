@@ -12,10 +12,90 @@ services:
 
     environment:
       - PORT=8000
+      - REDIS_URL=redis://redis:6379
+      - DATABASE_URL=postgresql://parallel:parallel@postgres:5432/parallel_ai
+      - DOCUMENT_STORAGE_PATH=/app/storage
+      - OLLAMA_URL=http://host.docker.internal:11434
+      - EMBEDDING_PROVIDER=ollama
+      - EMBEDDING_MODEL=nomic-embed-text
+      - PRIMARY_LLM_PROVIDER=ollama
+      - LLM_MODE=offline
+      - OLLAMA_LLM_MODEL=llama3.2:3b
+      - EMAIL_PROVIDER=smtp
+      - SMTP_HOST=mailpit
+      - SMTP_PORT=1025
+      - SMTP_USERNAME=
+      - SMTP_PASSWORD=
+      - SMTP_TLS=false
+      - EMAIL_FROM=no-reply@parallel-ai.local
+      - FRONTEND_URL=http://localhost:5173
+      - PASSWORD_RESET_BASE_URL=http://localhost:5173/reset-password
+      # Block HuggingFace network requests — Whisper model is pre-cached in the image
+      - HF_HUB_OFFLINE=1
+      - TRANSFORMERS_OFFLINE=1
 
     volumes:
       - ./backend:/app
+      - document_storage:/app/storage
+      # FIXED: Persist Whisper model cache for faster runtime audio transcription
+      - whisper_cache:/root/.cache
 
+    depends_on:
+      redis:
+        condition: service_healthy
+      postgres:
+        condition: service_healthy
+      mailpit:
+        condition: service_started
+
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/health')"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+    restart: always
+
+  mailpit:
+    image: axllent/mailpit:latest
+    container_name: parallelai-mailpit
+    restart: unless-stopped
+    ports:
+      - "8025:8025"
+      - "1025:1025"
+    volumes:
+      - mailpit_data:/data
+    environment:
+      MP_DATABASE: /data/mailpit.db
+      MP_MAX_MESSAGES: 5000
+
+  redis:
+    image: redis/redis-stack-server:latest
+    command: ["redis-stack-server", "--save", "60", "1", "--loglevel", "warning"]
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+    restart: always
+
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: parallel
+      POSTGRES_PASSWORD: parallel
+      POSTGRES_DB: parallel_ai
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U parallel -d parallel_ai"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
     restart: always
 
   frontend:
@@ -33,3 +113,11 @@ services:
       - backend
 
     restart: always
+
+volumes:
+  redis_data:
+  document_storage:
+  # FIXED: Persist Whisper model cache across container restarts
+  whisper_cache:
+  postgres_data:
+  mailpit_data:

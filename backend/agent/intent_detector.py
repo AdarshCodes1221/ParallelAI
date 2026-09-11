@@ -6,6 +6,7 @@ from types import SimpleNamespace
 from pydantic import BaseModel, Field
 from services.groq_service import GroqService, GroqServiceError
 from services.gemini_service import GeminiService, GeminiServiceError
+from services.providers.router import ProviderRouter
 
 logger = logging.getLogger(__name__)
 
@@ -14,7 +15,7 @@ class IntentResult(BaseModel):
     primary_intent: str = Field(..., description="The main goal of the user.")
     required_tools: list[str] = Field(..., description="List of tools needed.")
     is_ambiguous: bool = Field(default=False)
-    follow_up_question: str = Field(default=None)
+    follow_up_question: str | None = Field(default=None)
 
 
 # Keyword → tool shortcuts (no LLM needed)
@@ -35,6 +36,10 @@ COMMAND_MAP = {
 }
 
 YOUTUBE_RE = re.compile(r"(https?://)?(www\.)?(youtube\.com|youtu\.be)/\S+")
+CONVERSATION_RE = re.compile(
+    r"^(hi|hello|hey|thanks|thank you|good morning|good afternoon|good evening)[!. ]*$",
+    re.IGNORECASE,
+)
 
 
 def _auto_detect_tools(query: str, files: list[dict]) -> list[str] | None:
@@ -43,6 +48,8 @@ def _auto_detect_tools(query: str, files: list[dict]) -> list[str] | None:
     Returns a list of tools if confident, else None (→ fall back to LLM).
     """
     q = query.strip().lower()
+    if not files and CONVERSATION_RE.fullmatch(query.strip()):
+        return []
     tools = []
 
     # Slash-command shortcuts
@@ -78,7 +85,7 @@ def _auto_detect_tools(query: str, files: list[dict]) -> list[str] | None:
     # Append synthesis tools based on keywords
     if any(w in q for w in ["summar", "summarize", "tldr", "brief"]) and "summarizer" not in tools:
         tools.append("summarizer")
-    if any(w in q for w in ["sentiment", "tone", "mood", "feeling"]) and "sentiment" not in tools:
+    if any(w in q for w in ["sentiment", "tone", "mood", "feeling", "positive", "negative"]) and "sentiment" not in tools:
         tools.append("sentiment")
 
     # FIX TC3: code_analyzer should only trigger when an image is present.
@@ -88,6 +95,13 @@ def _auto_detect_tools(query: str, files: list[dict]) -> list[str] | None:
     elif not has_image and any(w in q for w in ["bug", "debug", "explain code", "time complexity"]) and "code_analyzer" not in tools:
         # Allow code_analyzer for text-only queries that explicitly ask about code analysis
         tools.append("code_analyzer")
+
+    if has_image and any(w in q for w in [
+        "icon", "logo", "github", "linkedin", "social", "link", "url", "website",
+        "identity", "id card", "identify", "person", "face", "describe", "visual",
+    ]):
+        if "vision" not in tools:
+            tools.append("vision")
 
     # FIX TC5: Cross-input comparison — audio + PDF together with comparison query
     compare_keywords = ["same topic", "compare", "similar", "discuss the same", "both discuss", "match"]
@@ -105,14 +119,20 @@ class IntentDetector:
 
     @staticmethod
     def detect(query: str, files: list[dict], api_key: str | None = None, model_name: str = "gemini-2.5-flash") -> IntentResult:
+        if not files and CONVERSATION_RE.fullmatch(query.strip()):
+            return IntentResult(primary_intent="conversation", required_tools=[], is_ambiguous=False)
+
         # 1. Fast rule-based detection
         fast_tools = _auto_detect_tools(query, files)
         if fast_tools:
             return IntentResult(
-                primary_intent="Auto-detected",
+                primary_intent="mixed" if len(fast_tools) > 1 else fast_tools[0].replace("_parser", "").replace("_stt", ""),
                 required_tools=fast_tools,
                 is_ambiguous=False,
             )
+
+        if not files and not YOUTUBE_RE.search(query):
+            return IntentResult(primary_intent="conversation", required_tools=[], is_ambiguous=False)
 
         # 2. LLM-based detection for complex/ambiguous requests
         if not query.strip() and not files:
@@ -125,11 +145,12 @@ class IntentDetector:
 
         # If there are files but no clear text query
         if files and not query.strip():
+            auto = _auto_detect_tools(query, files)
             return IntentResult(
-                primary_intent="File uploaded, intent unclear",
-                required_tools=[],
-                is_ambiguous=True,
-                follow_up_question="What would you like me to do with this file? Options: Extract Text, Summarize, Sentiment Analysis, Find Action Items.",
+                primary_intent="File uploaded",
+                required_tools=auto or [],
+                is_ambiguous=False,
+                follow_up_question=None,
             )
 
         # Build a short description of attached files for the LLM prompt
@@ -159,51 +180,31 @@ Rules:
 
 Return ONLY raw JSON: {{"primary_intent": "string", "required_tools": ["tool1"], "is_ambiguous": false, "follow_up_question": null}}
 """
-        groq_key = os.environ.get("GROQ_API_KEY", "")
-        gemini_key = api_key
         res = None
-
-        if groq_key:
-            try:
-                groq_text = GroqService.generate_text(
-                    prompt,
-                    api_key=groq_key,
-                    model_name=model_name,
-                    max_tokens=1024,
-                )
-                res = SimpleNamespace(text=groq_text)
-            except GroqServiceError as service_err:
-                if getattr(service_err, "code", "") == "rate_limit":
-                    logger.warning("Groq rate limit while detecting intent: %s", str(service_err))
-                else:
-                    logger.warning("Groq intent detection failed, falling back to Gemini: %s", service_err)
-            except Exception as e:
-                logger.exception("Unexpected Groq intent detection error: %s", e)
-
-        if res is None and gemini_key:
-            try:
-                res = GeminiService.generate_content(
-                    prompt,
-                    api_key=gemini_key,
-                    model_name=model_name,
-                )
-            except GeminiServiceError as service_err:
-                if service_err.code == "rate_limit":
-                    logger.warning("Gemini rate limit while detecting intent: %s", str(service_err))
-                else:
-                    logger.exception("Gemini intent detection failed: %s", service_err)
-                res = None
-            except Exception as e:
-                logger.exception("Unexpected intent detection error: %s", e)
-                res = None
+        try:
+            res = SimpleNamespace(text=ProviderRouter().generate(
+                prompt, model=model_name, json_output=True,
+            ))
+        except Exception as exc:
+            logger.warning("Intent detection provider unavailable: %s", type(exc).__name__)
 
         # If the LLM call failed, fall back to fast rule-based detection
         if res is None:
             auto = _auto_detect_tools(query, files)
             if auto:
-                return IntentResult(primary_intent="Fallback detection", required_tools=auto, is_ambiguous=False)
-            return IntentResult(primary_intent="Unknown", required_tools=[], is_ambiguous=False)
+                return IntentResult(primary_intent="mixed" if len(auto) > 1 else auto[0], required_tools=auto, is_ambiguous=False)
+            return IntentResult(primary_intent="conversation", required_tools=[], is_ambiguous=False)
 
-        raw = res.text.replace("```json", "").replace("```", "").strip()
-        data = json.loads(raw)
-        return IntentResult(**data)
+        raw = str(getattr(res, "text", "")).replace("```json", "").replace("```", "").strip()
+        try:
+            data = json.loads(raw)
+            if not isinstance(data, dict):
+                raise ValueError("intent response is not an object")
+            return IntentResult(**data)
+        except (json.JSONDecodeError, TypeError, ValueError):
+            auto = _auto_detect_tools(query, files)
+            return IntentResult(
+                primary_intent="mixed" if len(auto or []) > 1 else (auto[0] if auto else "conversation"),
+                required_tools=auto or [],
+                is_ambiguous=False,
+            )

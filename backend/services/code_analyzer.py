@@ -1,6 +1,7 @@
 from pydantic import BaseModel, Field
 from services.groq_service import GroqService, GroqServiceError
 from services.gemini_service import GeminiService, GeminiServiceError
+from services.providers.router import ProviderRouter
 
 
 class CodeAnalysisOutput(BaseModel):
@@ -33,30 +34,7 @@ class CodeAnalyzerService:
             return "No valid code detected."
 
         prompt = f"{CodeAnalyzerService.get_system_prompt()}\n\nCode to analyze:\n```\n{code}\n```"
-        groq_key = groq_api_key or None
-        gemini_key = gemini_api_key or None
-
-        if groq_key:
-            try:
-                return GroqService.generate_text(
-                    prompt,
-                    api_key=groq_key,
-                    model_name=model_name,
-                    max_tokens=1024,
-                )
-            except GroqServiceError as e:
-                logger = __import__("logging").getLogger(__name__)
-                logger.warning("Groq code analysis failed. Falling back to Gemini: %s", e)
-
-        if gemini_key:
-            try:
-                result = GeminiService.generate_content(
-                    prompt,
-                    api_key=gemini_api_key,
-                    model_name=model_name or "gemini-2.5-flash",
-                )
-                return result.text.strip()
-            except GeminiServiceError as e:
-                raise
-
-        raise RuntimeError("No available code analysis provider: GROQ_API_KEY or GEMINI_API_KEY is required.")
+        return ProviderRouter().generate(
+            prompt, model=model_name or "gemini-2.5-flash",
+            system_prompt=CodeAnalyzerService.get_system_prompt(),
+        )

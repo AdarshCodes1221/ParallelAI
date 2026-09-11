@@ -1,9 +1,8 @@
-import { useRef, useEffect, useState, type KeyboardEvent } from 'react'
+import { useRef, useEffect, useState, type KeyboardEvent, type ClipboardEvent } from 'react'
 import { motion, AnimatePresence } from 'framer-motion'
-import { Paperclip, Send, X, Bot, User, RefreshCw, FileText, Music2, Image } from 'lucide-react'
+import { Paperclip, Send, X, Bot, User, RefreshCw, FileText, Music2, Image, ArrowDown, Mic } from 'lucide-react'
 import { useAgentStore, type Message } from '@/store/agentStore'
 import { useAgentSSE } from '@/hooks/useAgentSSE'
-import { Mic } from 'lucide-react'
 
 // ── File pill ──────────────────────────────────────────────
 function FilePill({ file, onRemove }: { file: File; onRemove: () => void }) {
@@ -13,15 +12,26 @@ function FilePill({ file, onRemove }: { file: File; onRemove: () => void }) {
     : FileText
 
   const isAudio = file.type.startsWith('audio/') || ['mp3', 'wav', 'm4a', 'webm'].includes(ext)
+  const isImage = file.type.startsWith('image/') || ['jpg', 'jpeg', 'png'].includes(ext)
   const [audioUrl, setAudioUrl] = useState<string | null>(null)
+  const [imageUrl, setImageUrl] = useState<string | null>(null)
 
   useEffect(() => {
     if (isAudio) {
       const url = URL.createObjectURL(file)
+      // eslint-disable-next-line react-hooks/set-state-in-effect
       setAudioUrl(url)
       return () => URL.revokeObjectURL(url)
     }
   }, [file, isAudio])
+
+  useEffect(() => {
+    if (!isImage) return
+    const url = URL.createObjectURL(file)
+    // eslint-disable-next-line react-hooks/set-state-in-effect
+    setImageUrl(url)
+    return () => URL.revokeObjectURL(url)
+  }, [file, isImage])
 
   return (
     <motion.span
@@ -39,6 +49,9 @@ function FilePill({ file, onRemove }: { file: File; onRemove: () => void }) {
       </div>
       {audioUrl && (
         <audio controls src={audioUrl} className="h-6 w-32 mt-1 opacity-80" />
+      )}
+      {imageUrl && (
+        <img src={imageUrl} alt={file.name} className="h-20 w-28 rounded object-cover mt-1" />
       )}
     </motion.span>
   )
@@ -117,6 +130,7 @@ export function ChatPanel() {
   const mediaRecorderRef = useRef<MediaRecorder | null>(null)
   const audioChunksRef = useRef<Blob[]>([])
   
+  const [showJumpToBottom, setShowJumpToBottom] = useState(false)
   const endRef       = useRef<HTMLDivElement>(null)
   const scrollRef    = useRef<HTMLDivElement>(null)
   const shouldAutoScrollRef = useRef(true)
@@ -129,6 +143,7 @@ export function ChatPanel() {
     if (!el) return
     const distanceFromBottom = el.scrollHeight - el.scrollTop - el.clientHeight
     shouldAutoScrollRef.current = distanceFromBottom < 150
+    setShowJumpToBottom(distanceFromBottom > 200)
   }
 
   // auto-scroll only when user is near the bottom
@@ -146,6 +161,7 @@ export function ChatPanel() {
   // handle pending tool commands from ToolGrid
   useEffect(() => {
     if (pendingToolCommand) {
+      // eslint-disable-next-line react-hooks/set-state-in-effect
       setQuery((prev) => (prev ? `${prev} ${pendingToolCommand}` : pendingToolCommand))
       setPendingToolCommand(null)
       if (textareaRef.current) {
@@ -175,25 +191,73 @@ export function ChatPanel() {
     sendQuery(q, files)
     setQuery('')
     setFiles([])
-    if (textareaRef.current) textareaRef.current.style.height = 'auto'
+    if (textareaRef.current) {
+      textareaRef.current.style.height = 'auto'
+      setTimeout(() => textareaRef.current?.focus(), 50)
+    }
   }
 
-  const addFiles = (incoming: FileList | null) => {
+  const addFiles = (incoming: FileList | File[] | null) => {
     if (!incoming) return
     const arr = Array.from(incoming)
+    const MAX_SIZE = 25 * 1024 * 1024 // 25 MB
+    const tooLarge = arr.find((f) => f.size > MAX_SIZE)
+    if (tooLarge) {
+      alert(`"${tooLarge.name}" is too large. Maximum allowed file size is 25 MB.`)
+      return
+    }
     setFiles((prev) => {
       const existing = new Set(prev.map((f) => `${f.name}${f.size}`))
       return [...prev, ...arr.filter((f) => !existing.has(`${f.name}${f.size}`))]
     })
   }
 
+  const handlePaste = (event: ClipboardEvent<HTMLTextAreaElement>) => {
+    const pastedImage = Array.from(event.clipboardData.items)
+      .find((item) => item.type.startsWith('image/'))
+      ?.getAsFile()
+    if (!pastedImage) return
+    event.preventDefault()
+    const extension = pastedImage.type.split('/')[1] || 'png'
+    const imageFile = new File([pastedImage], `pasted-image-${Date.now()}.${extension}`, {
+      type: pastedImage.type,
+    })
+    addFiles([imageFile])
+  }
+
+  const [recordingSeconds, setRecordingSeconds] = useState(0)
+  const timerIntervalRef = useRef<number | null>(null)
+  const mediaStreamRef = useRef<MediaStream | null>(null)
+
+
+  useEffect(() => {
+    if (isRecording) {
+      // eslint-disable-next-line react-hooks/set-state-in-effect
+      setRecordingSeconds(0)
+      timerIntervalRef.current = setInterval(() => {
+        setRecordingSeconds((s) => s + 1)
+      }, 1000)
+    } else {
+      if (timerIntervalRef.current) {
+        clearInterval(timerIntervalRef.current)
+        timerIntervalRef.current = null
+      }
+    }
+    return () => {
+      if (timerIntervalRef.current) clearInterval(timerIntervalRef.current)
+    }
+  }, [isRecording])
+
   const toggleRecording = async () => {
     if (isRecording) {
-      mediaRecorderRef.current?.stop()
+      if (mediaRecorderRef.current && mediaRecorderRef.current.state !== 'inactive') {
+        mediaRecorderRef.current.stop()
+      }
       setIsRecording(false)
     } else {
       try {
         const stream = await navigator.mediaDevices.getUserMedia({ audio: true })
+        mediaStreamRef.current = stream
         const mediaRecorder = new MediaRecorder(stream)
         mediaRecorderRef.current = mediaRecorder
         audioChunksRef.current = []
@@ -203,19 +267,26 @@ export function ChatPanel() {
         }
 
         mediaRecorder.onstop = () => {
-          const audioBlob = new Blob(audioChunksRef.current, { type: 'audio/webm' })
-          const audioFile = new File([audioBlob], `voice-input-${Date.now()}.webm`, { type: 'audio/webm' })
-          setFiles((prev) => [...prev, audioFile])
-          stream.getTracks().forEach(t => t.stop())
+          if (audioChunksRef.current.length > 0) {
+            const audioBlob = new Blob(audioChunksRef.current, { type: 'audio/webm' })
+            const audioFile = new File([audioBlob], `voice-input-${Date.now()}.webm`, { type: 'audio/webm' })
+            setFiles((prev) => [...prev, audioFile])
+          }
+          if (mediaStreamRef.current) {
+            mediaStreamRef.current.getTracks().forEach((t) => t.stop())
+            mediaStreamRef.current = null
+          }
         }
 
-        mediaRecorder.start()
+        mediaRecorder.start(250) // collect chunks every 250ms
         setIsRecording(true)
       } catch (err) {
         console.error("Microphone access denied or error:", err)
+        setIsRecording(false)
       }
     }
   }
+
 
   return (
     <div className="flex flex-col h-full">
@@ -276,10 +347,28 @@ export function ChatPanel() {
           )}
         </AnimatePresence>
         <div ref={endRef} />
+
+        {/* Floating Jump to Latest Button */}
+        <AnimatePresence>
+          {showJumpToBottom && (
+            <motion.button
+              initial={{ opacity: 0, scale: 0.8, y: 10 }}
+              animate={{ opacity: 1, scale: 1, y: 0 }}
+              exit={{ opacity: 0, scale: 0.8, y: 10 }}
+              onClick={() => {
+                scrollRef.current?.scrollTo({ top: scrollRef.current.scrollHeight, behavior: 'smooth' })
+              }}
+              className="absolute bottom-28 right-6 z-20 flex items-center gap-1.5 px-3 py-1.5 rounded-full bg-slate-900/90 border border-cyan-500/50 text-cyan-300 text-xs font-medium shadow-xl backdrop-blur-md hover:bg-slate-800 hover:text-cyan-200 transition cursor-pointer"
+            >
+              <ArrowDown size={13} className="text-cyan-400 animate-bounce" />
+              <span>Jump to latest</span>
+            </motion.button>
+          )}
+        </AnimatePresence>
       </div>
 
       {/* Input zone */}
-      <div className="px-2 sm:px-5 pb-3 sm:pb-5 flex-shrink-0">
+      <div className="px-2 sm:px-5 pb-3 sm:pb-5 pt-2 flex-shrink-0 sticky bottom-0 z-10 bg-bg/90 backdrop-blur-md border-t border-border/40">
         {/* File pills */}
         <AnimatePresence>
           {files.length > 0 && (
@@ -300,10 +389,34 @@ export function ChatPanel() {
           )}
         </AnimatePresence>
 
+        {/* Voice Recording Active Banner */}
+        <AnimatePresence>
+          {isRecording && (
+            <motion.div
+              initial={{ height: 0, opacity: 0 }}
+              animate={{ height: 'auto', opacity: 1 }}
+              exit={{ height: 0, opacity: 0 }}
+              className="flex items-center justify-between bg-red/15 border border-red/30 rounded-xl px-3 py-1.5 mb-2 text-xs text-red-300"
+            >
+              <div className="flex items-center gap-2">
+                <span className="w-2 h-2 rounded-full bg-red animate-ping" />
+                <span className="font-semibold font-mono">Recording Voice Input... ({recordingSeconds}s)</span>
+              </div>
+              <button
+                onClick={toggleRecording}
+                className="text-[10px] bg-red/20 hover:bg-red/30 text-white px-2 py-0.5 rounded font-mono transition"
+              >
+                Done / Stop
+              </button>
+            </motion.div>
+          )}
+        </AnimatePresence>
+
         <div className="
           flex flex-wrap sm:flex-nowrap items-end gap-2 glass border border-border rounded-2xl p-3
           focus-within:border-purple transition-colors
         ">
+
           {/* Attach */}
           <label
             className="flex-shrink-0 text-gray-600 hover:text-purple-light cursor-pointer transition-colors p-1"
@@ -338,6 +451,7 @@ export function ChatPanel() {
             onChange={(e) => setQuery(e.target.value)}
             onInput={handleInput}
             onKeyDown={handleKeyDown}
+            onPaste={handlePaste}
             placeholder="Ask a question, describe your goal…"
             rows={1}
             className="

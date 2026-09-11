@@ -6,7 +6,7 @@ const estimateCost = (query: string, files: File[]) => {
   const outputTokens = Math.max(50, Math.min(600, Math.ceil(inputTokens * 0.35)))
   const estimated_cost_usd = Number(((inputTokens + outputTokens) * 0.0000004).toFixed(6))
   return {
-    provider: 'Gemini Estimate',
+    provider: 'Pending provider',
     input_tokens_est: inputTokens,
     output_tokens_est: outputTokens,
     estimated_cost_usd,
@@ -15,7 +15,7 @@ const estimateCost = (query: string, files: File[]) => {
 
 export function useAgentSSE() {
   const { addMessage, appendToken, setAudioUrl, setPlanSteps, updateStepStatus, setCost, setExtractedFiles,
-    setRobotState, setActiveToolCard, selectedModel } = useAgentStore()
+    setRobotState, setActiveToolCard, selectedModel, currentChatId } = useAgentStore()
   const abortRef = useRef<AbortController | null>(null)
 
   async function sendQuery(query: string, files: File[]) {
@@ -43,18 +43,37 @@ export function useAgentSSE() {
     formData.append('query', finalQuery)
     formData.append('stream', 'true')
     formData.append('model', selectedModel)
+    formData.append('session_id', currentChatId)
     files.forEach((f) => formData.append('files', f))
 
     setCost(estimateCost(finalQuery, files))
 
+    const csrf = typeof document !== 'undefined' ? (document.cookie.match(/(^|;)\s*csrf_token=([^;]+)/)?.[2] || '') : ''
+    const headers: Record<string, string> = {
+      'X-Requested-With': 'XMLHttpRequest',
+    }
+    if (csrf) {
+      headers['X-CSRF-Token'] = decodeURIComponent(csrf)
+    }
+
     try {
-      const res = await fetch('http://localhost:8000/api/agent', {
+      const res = await fetch(`/api/agent`, {
         method: 'POST',
+        credentials: 'include',
+        headers,
         body: formData,
         signal: abortRef.current.signal,
       })
 
-      if (!res.ok) throw new Error(`HTTP ${res.status}`)
+      if (!res.ok) {
+        if (res.status === 413) {
+          throw new Error('Uploaded file is too large. Maximum allowed upload size is 25 MB.')
+        }
+        if (res.status === 401) {
+          throw new Error('Authentication required or session expired. Please sign in.')
+        }
+        throw new Error(`Server returned HTTP ${res.status}`)
+      }
       if (!res.body) throw new Error('No body')
 
       const reader = res.body.getReader()
